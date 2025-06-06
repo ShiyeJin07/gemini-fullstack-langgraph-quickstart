@@ -7,7 +7,6 @@ from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
 
 from agent.state import (
     OverallState,
@@ -23,28 +22,25 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.chat_models import ChatOllama
 from agent.utils import (
-    get_citations,
+    tavily_search,
     get_research_topic,
-    insert_citation_markers,
+    replace_citation_labels,
     resolve_urls,
 )
 
 load_dotenv()
 
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
-
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+if os.getenv("TAVILY_API_KEY") is None:
+    raise ValueError("TAVILY_API_KEY is not set")
 
 
 # Nodes
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     """LangGraph node that generates a search queries based on the User's question.
 
-    Uses Gemini 2.0 Flash to create an optimized search query for web research based on
+    Uses an Ollama-served model to create an optimized search query for web research based on
     the User's question.
 
     Args:
@@ -60,12 +56,12 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
 
-    # init Gemini 2.0 Flash
-    llm = ChatGoogleGenerativeAI(
+    # init model via Ollama
+    llm = ChatOllama(
         model=configurable.query_generator_model,
         temperature=1.0,
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
     structured_llm = llm.with_structured_output(SearchQueryList)
 
@@ -93,9 +89,9 @@ def continue_to_web_research(state: QueryGenerationState):
 
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs web research using the native Google Search API tool.
+    """LangGraph node that performs web research using Tavily search.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.0 Flash.
+    Executes a web search using Tavily and summarizes the snippets with the Ollama model.
 
     Args:
         state: Current graph state containing the search query and research loop count
@@ -106,28 +102,38 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     # Configure
     configurable = Configuration.from_runnable_config(config)
+
+    search_results = tavily_search(state["search_query"])
+    resolved_urls = resolve_urls(search_results, state["id"])
+
+    result_lines = []
+    citation_map = {}
+    for idx, res in enumerate(search_results):
+        label = str(idx + 1)
+        short_url = resolved_urls.get(res["url"])
+        citation_map[label] = {
+            "label": label,
+            "short_url": short_url,
+            "value": res["url"],
+        }
+        snippet = res.get("content") or res.get("snippet", "")
+        result_lines.append(f"[{label}] {snippet}")
+
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
         research_topic=state["search_query"],
+        search_results="\n".join(result_lines),
     )
 
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
+    llm = ChatOllama(
         model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
+        temperature=0,
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        max_retries=2,
     )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
+    result = llm.invoke(formatted_prompt)
+
+    modified_text, sources_gathered = replace_citation_labels(result.content, citation_map)
 
     return {
         "sources_gathered": sources_gathered,
@@ -163,11 +169,11 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
     # init Reasoning Model
-    llm = ChatGoogleGenerativeAI(
+    llm = ChatOllama(
         model=reasoning_model,
         temperature=1.0,
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
     result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
 
@@ -241,12 +247,12 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         summaries="\n---\n\n".join(state["web_research_result"]),
     )
 
-    # init Reasoning Model, default to Gemini 2.5 Flash
-    llm = ChatGoogleGenerativeAI(
+    # init Reasoning Model using Ollama
+    llm = ChatOllama(
         model=reasoning_model,
         temperature=0,
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
     result = llm.invoke(formatted_prompt)
 
