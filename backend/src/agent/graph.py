@@ -7,7 +7,6 @@ from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
 
 from agent.state import (
     OverallState,
@@ -25,9 +24,9 @@ from agent.prompts import (
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
-    get_citations,
+    tavily_search,
     get_research_topic,
-    insert_citation_markers,
+    replace_citation_labels,
     resolve_urls,
 )
 
@@ -35,9 +34,8 @@ load_dotenv()
 
 if os.getenv("GEMINI_API_KEY") is None:
     raise ValueError("GEMINI_API_KEY is not set")
-
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+if os.getenv("TAVILY_API_KEY") is None:
+    raise ValueError("TAVILY_API_KEY is not set")
 
 
 # Nodes
@@ -106,28 +104,38 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     # Configure
     configurable = Configuration.from_runnable_config(config)
+
+    search_results = tavily_search(state["search_query"])
+    resolved_urls = resolve_urls(search_results, state["id"])
+
+    result_lines = []
+    citation_map = {}
+    for idx, res in enumerate(search_results):
+        label = str(idx + 1)
+        short_url = resolved_urls.get(res["url"])
+        citation_map[label] = {
+            "label": label,
+            "short_url": short_url,
+            "value": res["url"],
+        }
+        snippet = res.get("content") or res.get("snippet", "")
+        result_lines.append(f"[{label}] {snippet}")
+
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
         research_topic=state["search_query"],
+        search_results="\n".join(result_lines),
     )
 
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
+    llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
+        temperature=0,
+        max_retries=2,
+        api_key=os.getenv("GEMINI_API_KEY"),
     )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
+    result = llm.invoke(formatted_prompt)
+
+    modified_text, sources_gathered = replace_citation_labels(result.content, citation_map)
 
     return {
         "sources_gathered": sources_gathered,
