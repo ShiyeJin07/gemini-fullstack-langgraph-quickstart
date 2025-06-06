@@ -1,4 +1,8 @@
 from typing import Any, Dict, List
+import json
+import os
+import re
+import urllib.request
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
 
 
@@ -19,21 +23,55 @@ def get_research_topic(messages: List[AnyMessage]) -> str:
     return research_topic
 
 
+def tavily_search(query: str, max_results: int = 5, api_key: str | None = None) -> List[Dict[str, Any]]:
+    """Query the Tavily search API and return results."""
+    api_key = api_key or os.getenv("TAVILY_API_KEY")
+    if api_key is None:
+        raise ValueError("TAVILY_API_KEY is not set")
+    payload = json.dumps({"api_key": api_key, "query": query, "max_results": max_results}).encode()
+    req = urllib.request.Request(
+        "https://api.tavily.com/search",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode())
+    return data.get("results", [])
+
+
 def resolve_urls(urls_to_resolve: List[Any], id: int) -> Dict[str, str]:
     """
     Create a map of the vertex ai search urls (very long) to a short url with a unique id for each url.
     Ensures each original URL gets a consistent shortened form while maintaining uniqueness.
     """
-    prefix = f"https://vertexaisearch.cloud.google.com/id/"
-    urls = [site.web.uri for site in urls_to_resolve]
+    prefix = f"https://tavily-search.com/id/"
+    urls = []
+    for item in urls_to_resolve:
+        if isinstance(item, dict) and "url" in item:
+            urls.append(item["url"])
+        else:
+            try:
+                urls.append(item.web.uri)
+            except AttributeError:
+                urls.append(str(item))
 
-    # Create a dictionary that maps each unique URL to its first occurrence index
     resolved_map = {}
     for idx, url in enumerate(urls):
         if url not in resolved_map:
             resolved_map[url] = f"{prefix}{id}-{idx}"
 
     return resolved_map
+
+
+def replace_citation_labels(text: str, citation_map: Dict[str, Dict[str, str]]):
+    """Replace citation labels like [1] with markdown links."""
+    used_sources = []
+    for label, data in citation_map.items():
+        marker = f"[{label}]"
+        if marker in text:
+            text = text.replace(marker, f"[{label}]({data['short_url']})")
+            used_sources.append(data)
+    return text, used_sources
 
 
 def insert_citation_markers(text, citations_list):
@@ -77,7 +115,8 @@ def insert_citation_markers(text, citations_list):
 
 def get_citations(response, resolved_urls_map):
     """
-    Extracts and formats citation information from a Gemini model's response.
+    Extracts and formats citation information from a model response that
+    includes grounding metadata (e.g. Gemini).
 
     This function processes the grounding metadata provided in the response to
     construct a list of citation objects. Each citation object includes the
@@ -85,7 +124,7 @@ def get_citations(response, resolved_urls_map):
     containing formatted markdown links to the supporting web chunks.
 
     Args:
-        response: The response object from the Gemini model, expected to have
+        response: The response object from the language model, expected to have
                   a structure including `candidates[0].grounding_metadata`.
                   It also relies on a `resolved_map` being available in its
                   scope to map chunk URIs to resolved URLs.
