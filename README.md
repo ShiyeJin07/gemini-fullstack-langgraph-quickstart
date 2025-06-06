@@ -8,7 +8,9 @@ This project demonstrates a fullstack application using a React frontend and a L
 
 - 💬 Fullstack application with a React frontend and LangGraph backend.
 - 🧠 Powered by a LangGraph agent for advanced research and conversational AI.
+
 - 🔍 Dynamic search query generation using an Ollama-served model.
+
 - 🌐 Integrated web research via the Tavily Search API.
 - 🤔 Reflective reasoning to identify knowledge gaps and refine searches.
 - 📄 Generates answers with citations from gathered sources.
@@ -75,6 +77,7 @@ The core of the backend is a LangGraph agent defined in `backend/src/agent/graph
 1.  **Generate Initial Queries:** Based on your input, it generates a set of initial search queries using an Ollama-served model.
 2.  **Web Research:** For each query, it uses the Tavily Search API in combination with that model to summarize the results.
 3.  **Reflection & Knowledge Gap Analysis:** The agent analyzes the search results to determine if the information is sufficient or if there are knowledge gaps. It again uses the Ollama model for this reflection process.
+
 4.  **Iterative Refinement:** If gaps are found or the information is insufficient, it generates follow-up queries and repeats the web research and reflection steps (up to a configured maximum number of loops).
 5.  **Finalize Answer:** Once the research is deemed sufficient, the agent synthesizes the gathered information into a coherent answer, including citations from the web sources, using the Ollama model.
 

@@ -32,6 +32,7 @@ from agent.utils import (
 
 load_dotenv()
 
+
 if os.getenv("TAVILY_API_KEY") is None:
     raise ValueError("TAVILY_API_KEY is not set")
 
